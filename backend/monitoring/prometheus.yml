@@ -1,0 +1,117 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'dunksense-prod'
+    environment: 'production'
+
+rule_files:
+  - "rules/*.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 15s
+    metrics_path: /metrics
+
+  # DunkSense Metrics Service
+  - job_name: 'dunksense-metrics-svc'
+    static_configs:
+      - targets: ['metrics-svc:8080']
+    scrape_interval: 10s
+    metrics_path: /metrics
+    scrape_timeout: 10s
+    honor_labels: true
+    labels:
+      service: 'metrics-svc'
+      team: 'backend'
+
+  # PostgreSQL monitoring
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    scrape_interval: 30s
+    labels:
+      service: 'postgres'
+      team: 'infrastructure'
+
+  # MongoDB monitoring
+  - job_name: 'mongodb'
+    static_configs:
+      - targets: ['mongodb-exporter:9216']
+    scrape_interval: 30s
+    labels:
+      service: 'mongodb'
+      team: 'infrastructure'
+
+  # Redis monitoring
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+    scrape_interval: 30s
+    labels:
+      service: 'redis'
+      team: 'infrastructure'
+
+  # Kafka monitoring
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['kafka:9101']
+    scrape_interval: 30s
+    labels:
+      service: 'kafka'
+      team: 'infrastructure'
+
+  # Node Exporter for system metrics
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 15s
+    labels:
+      service: 'node-exporter'
+      team: 'infrastructure'
+
+  # Nginx monitoring
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+    scrape_interval: 30s
+    labels:
+      service: 'nginx'
+      team: 'infrastructure'
+
+  # Blackbox exporter for endpoint monitoring
+  - job_name: 'blackbox'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+        - http://metrics-svc:8080/health
+        - http://nginx:80
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # Custom application metrics
+  - job_name: 'dunksense-custom-metrics'
+    static_configs:
+      - targets: ['metrics-svc:8080']
+    scrape_interval: 5s
+    metrics_path: /api/v1/metrics/prometheus
+    honor_labels: true
+    labels:
+      service: 'dunksense-app'
+      team: 'backend' 

@@ -3,240 +3,208 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/Danchouvzv/DunkSense/backend/pkg/metrics"
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
+	"github.com/Danchouvzv/DunkSense/backend/pkg/config"
+	"github.com/Danchouvzv/DunkSense/backend/pkg/logging"
+	"github.com/Danchouvzv/DunkSense/backend/pkg/metrics"
+	"github.com/Danchouvzv/DunkSense/backend/pkg/monitoring"
 )
-
-const (
-	defaultGRPCPort = ":50051"
-	defaultHTTPPort = ":8080"
-)
-
-type Server struct {
-	grpcServer   *grpc.Server
-	httpServer   *http.Server
-	metricsStore *metrics.Store
-	logger       *zap.Logger
-	upgrader     websocket.Upgrader
-}
 
 func main() {
-	// Initialize logger
-	logger, err := zap.NewProduction()
+	// Load configuration
+	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatal("Failed to initialize logger:", err)
+		fmt.Printf("Failed to load configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Initialize logger
+	logger, err := logging.NewLogger(
+		logging.LogLevel(cfg.Monitoring.LogLevel),
+		cfg.Server.Environment,
+	)
+	if err != nil {
+		fmt.Printf("Failed to initialize logger: %v\n", err)
+		os.Exit(1)
 	}
 	defer logger.Sync()
 
-	// Initialize metrics store
-	store, err := metrics.NewStore()
+	// Initialize global logger
+	if err := logging.InitGlobalLogger(
+		logging.LogLevel(cfg.Monitoring.LogLevel),
+		cfg.Server.Environment,
+	); err != nil {
+		logger.Error("Failed to initialize global logger", err)
+		os.Exit(1)
+	}
+
+	// Initialize metrics
+	metricsCollector := monitoring.NewMetrics()
+
+	// Initialize database store
+	store, err := metrics.NewStore(cfg.Database.PostgresURI)
 	if err != nil {
-		logger.Fatal("Failed to initialize metrics store", zap.Error(err))
+		logger.WithError(err).Error("Failed to initialize database store")
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// Initialize metrics service
+	metricsService := metrics.NewService(store, logger)
+
+	// Set up Gin router
+	if cfg.Server.Environment == "production" {
+		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// Create server
-	server := &Server{
-		metricsStore: store,
-		logger:       logger,
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool {
-				// In production, implement proper origin checking
-				return true
-			},
-		},
-	}
-
-	// Start servers
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Start gRPC server
-	go server.startGRPCServer(ctx)
-
-	// Start HTTP/WebSocket server
-	go server.startHTTPServer(ctx)
-
-	// Wait for interrupt signal
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
-
-	logger.Info("Shutting down servers...")
-	cancel()
-
-	// Graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
-
-	if server.httpServer != nil {
-		server.httpServer.Shutdown(shutdownCtx)
-	}
-	if server.grpcServer != nil {
-		server.grpcServer.GracefulStop()
-	}
-
-	logger.Info("Servers shut down successfully")
-}
-
-func (s *Server) startGRPCServer(ctx context.Context) {
-	grpcPort := os.Getenv("GRPC_PORT")
-	if grpcPort == "" {
-		grpcPort = defaultGRPCPort
-	}
-
-	lis, err := net.Listen("tcp", grpcPort)
-	if err != nil {
-		s.logger.Fatal("Failed to listen on gRPC port", zap.String("port", grpcPort), zap.Error(err))
-	}
-
-	s.grpcServer = grpc.NewServer()
-	
-	// Register services here
-	// metrics.RegisterMetricsServiceServer(s.grpcServer, s)
-
-	s.logger.Info("Starting gRPC server", zap.String("port", grpcPort))
-	
-	if err := s.grpcServer.Serve(lis); err != nil {
-		s.logger.Error("gRPC server failed", zap.Error(err))
-	}
-}
-
-func (s *Server) startHTTPServer(ctx context.Context) {
-	httpPort := os.Getenv("HTTP_PORT")
-	if httpPort == "" {
-		httpPort = defaultHTTPPort
-	}
-
-	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
+
+	// Add middleware
+	router.Use(gin.Recovery())
+	router.Use(metricsCollector.HTTPMiddleware)
+	router.Use(requestIDMiddleware())
+	router.Use(loggingMiddleware(logger))
+	router.Use(corsMiddleware())
 
 	// Health check endpoint
-	router.GET("/health", s.healthCheck)
-	
-	// WebSocket endpoint for real-time metrics
-	router.GET("/ws/metrics", s.handleWebSocket)
-	
-	// REST API endpoints
-	api := router.Group("/api/v1")
-	{
-		api.POST("/metrics", s.submitMetrics)
-		api.GET("/metrics/:athleteId", s.getMetrics)
-		api.GET("/metrics/:athleteId/summary", s.getMetricsSummary)
-	}
-
-	s.httpServer = &http.Server{
-		Addr:    httpPort,
-		Handler: router,
-	}
-
-	s.logger.Info("Starting HTTP server", zap.String("port", httpPort))
-	
-	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		s.logger.Error("HTTP server failed", zap.Error(err))
-	}
-}
-
-func (s *Server) healthCheck(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"status":    "healthy",
-		"service":   "metrics-svc",
-		"timestamp": time.Now().Unix(),
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":    "healthy",
+			"timestamp": time.Now().UTC(),
+			"version":   "1.0.0",
+		})
 	})
+
+	// Metrics endpoint for Prometheus
+	router.GET("/metrics", gin.WrapH(metricsCollector.Handler()))
+
+	// API routes
+	v1 := router.Group("/api/v1")
+	{
+		// Jump metrics endpoints
+		v1.POST("/jumps", metricsService.CreateJumpMetric)
+		v1.GET("/jumps", metricsService.GetJumpMetrics)
+		v1.GET("/jumps/:id", metricsService.GetJumpMetric)
+		v1.PUT("/jumps/:id", metricsService.UpdateJumpMetric)
+		v1.DELETE("/jumps/:id", metricsService.DeleteJumpMetric)
+
+		// User metrics endpoints
+		v1.GET("/users/:user_id/jumps", metricsService.GetUserJumpMetrics)
+		v1.GET("/users/:user_id/stats", metricsService.GetUserStats)
+		v1.GET("/users/:user_id/personal-best", metricsService.GetPersonalBest)
+
+		// Analytics endpoints
+		v1.GET("/analytics/daily", metricsService.GetDailyAnalytics)
+		v1.GET("/analytics/weekly", metricsService.GetWeeklyAnalytics)
+		v1.GET("/analytics/monthly", metricsService.GetMonthlyAnalytics)
+	}
+
+	// Create HTTP server
+	server := &http.Server{
+		Addr:         cfg.Server.HTTPPort,
+		Handler:      router,
+		ReadTimeout:  cfg.Server.ReadTimeout,
+		WriteTimeout: cfg.Server.WriteTimeout,
+	}
+
+	// Start server in a goroutine
+	go func() {
+		logger.Info("Starting HTTP server", map[string]interface{}{
+			"port":        cfg.Server.HTTPPort,
+			"environment": cfg.Server.Environment,
+		})
+
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.WithError(err).Error("Failed to start HTTP server")
+			os.Exit(1)
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shutdown the server
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	logger.Info("Shutting down server...")
+
+	// Create a deadline for shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Shutdown server gracefully
+	if err := server.Shutdown(ctx); err != nil {
+		logger.WithError(err).Error("Server forced to shutdown")
+		os.Exit(1)
+	}
+
+	logger.Info("Server exited")
 }
 
-func (s *Server) handleWebSocket(c *gin.Context) {
-	conn, err := s.upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		s.logger.Error("WebSocket upgrade failed", zap.Error(err))
-		return
-	}
-	defer conn.Close()
-
-	athleteID := c.Query("athleteId")
-	if athleteID == "" {
-		conn.WriteMessage(websocket.TextMessage, []byte(`{"error": "athleteId required"}`))
-		return
-	}
-
-	s.logger.Info("WebSocket connection established", zap.String("athleteId", athleteID))
-
-	// Handle WebSocket messages
-	for {
-		messageType, message, err := conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				s.logger.Error("WebSocket error", zap.Error(err))
-			}
-			break
+// requestIDMiddleware adds a unique request ID to each request
+func requestIDMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		requestID := c.GetHeader("X-Request-ID")
+		if requestID == "" {
+			requestID = generateRequestID()
 		}
 
-		// Echo message back for now (implement real-time metrics processing)
-		if err := conn.WriteMessage(messageType, message); err != nil {
-			s.logger.Error("WebSocket write error", zap.Error(err))
-			break
+		c.Header("X-Request-ID", requestID)
+		
+		// Add request ID to context
+		ctx := logging.WithRequestID(c.Request.Context(), requestID)
+		c.Request = c.Request.WithContext(ctx)
+
+		c.Next()
+	}
+}
+
+// loggingMiddleware logs HTTP requests
+func loggingMiddleware(logger *logging.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+		method := c.Request.Method
+
+		c.Next()
+
+		duration := time.Since(start)
+		statusCode := c.Writer.Status()
+		responseSize := int64(c.Writer.Size())
+
+		logger.LogRequest(
+			c.Request.Context(),
+			method,
+			path,
+			statusCode,
+			duration,
+			responseSize,
+		)
+	}
+}
+
+// corsMiddleware handles CORS headers
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-Request-ID")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
 		}
+
+		c.Next()
 	}
 }
 
-func (s *Server) submitMetrics(c *gin.Context) {
-	var req metrics.SubmitRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Process metrics submission
-	if err := s.metricsStore.Submit(c.Request.Context(), &req); err != nil {
-		s.logger.Error("Failed to submit metrics", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit metrics"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"status": "success"})
-}
-
-func (s *Server) getMetrics(c *gin.Context) {
-	athleteID := c.Param("athleteId")
-	if athleteID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "athleteId required"})
-		return
-	}
-
-	metrics, err := s.metricsStore.GetByAthleteID(c.Request.Context(), athleteID)
-	if err != nil {
-		s.logger.Error("Failed to get metrics", zap.String("athleteId", athleteID), zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get metrics"})
-		return
-	}
-
-	c.JSON(http.StatusOK, metrics)
-}
-
-func (s *Server) getMetricsSummary(c *gin.Context) {
-	athleteID := c.Param("athleteId")
-	if athleteID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "athleteId required"})
-		return
-	}
-
-	summary, err := s.metricsStore.GetSummary(c.Request.Context(), athleteID)
-	if err != nil {
-		s.logger.Error("Failed to get metrics summary", zap.String("athleteId", athleteID), zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get metrics summary"})
-		return
-	}
-
-	c.JSON(http.StatusOK, summary)
+// generateRequestID generates a unique request ID
+func generateRequestID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
 } 

@@ -1,0 +1,267 @@
+version: '3.8'
+
+services:
+  # MongoDB for metrics and athlete profiles
+  mongodb:
+    image: mongo:7.0
+    container_name: dunksense-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: dunksense
+    volumes:
+      - mongodb_data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - dunksense-network
+
+  # PostgreSQL for structured data
+  postgres:
+    image: postgres:15
+    container_name: dunksense-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: dunksense
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - dunksense-network
+
+  # Redis for caching and queues
+  redis:
+    image: redis:7-alpine
+    container_name: dunksense-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - dunksense-network
+
+  # Kafka for event streaming
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: dunksense-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - dunksense-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: dunksense-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - dunksense-network
+
+  # Kafka UI for development
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: dunksense-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    networks:
+      - dunksense-network
+
+  # MinIO for object storage (S3 compatible)
+  minio:
+    image: minio/minio:latest
+    container_name: dunksense-minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - dunksense-network
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: dunksense-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - dunksense-network
+
+  # Grafana for monitoring dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: dunksense-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - dunksense-network
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: dunksense-jaeger
+    restart: unless-stopped
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+    environment:
+      COLLECTOR_OTLP_ENABLED: true
+    networks:
+      - dunksense-network
+
+  # Elasticsearch for logging
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: dunksense-elasticsearch
+    restart: unless-stopped
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - dunksense-network
+
+  # Kibana for log visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: dunksense-kibana
+    restart: unless-stopped
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+    networks:
+      - dunksense-network
+
+  # Nginx for reverse proxy (development)
+  nginx:
+    image: nginx:alpine
+    container_name: dunksense-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - metrics-svc
+      - auth-svc
+    networks:
+      - dunksense-network
+
+  # Metrics Service
+  metrics-svc:
+    build:
+      context: .
+      dockerfile: cmd/metrics-svc/Dockerfile
+    container_name: dunksense-metrics-svc
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    environment:
+      - MONGODB_URI=mongodb://admin:password@mongodb:27017/dunksense?authSource=admin
+      - REDIS_URL=redis://redis:6379
+      - KAFKA_BROKERS=kafka:29092
+      - HTTP_PORT=:8080
+      - GRPC_PORT=:50051
+      - LOG_LEVEL=debug
+    depends_on:
+      - mongodb
+      - redis
+      - kafka
+    networks:
+      - dunksense-network
+
+  # Auth Service (placeholder)
+  auth-svc:
+    build:
+      context: .
+      dockerfile: cmd/auth-svc/Dockerfile
+    container_name: dunksense-auth-svc
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+      - "50052:50051"
+    environment:
+      - POSTGRES_URI=postgres://postgres:password@postgres:5432/dunksense?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+      - HTTP_PORT=:8080
+      - GRPC_PORT=:50051
+      - JWT_SECRET=your-secret-key-here
+      - LOG_LEVEL=debug
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - dunksense-network
+
+volumes:
+  mongodb_data:
+  postgres_data:
+  redis_data:
+  kafka_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:
+  elasticsearch_data:
+
+networks:
+  dunksense-network:
+    driver: bridge 

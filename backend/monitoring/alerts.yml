@@ -1,0 +1,319 @@
+groups:
+  - name: dunksense_api_alerts
+    rules:
+      # High-level SLA alerts
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status_code=~"5.."}[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes"
+          runbook_url: "https://docs.dunksense.ai/runbooks/high-error-rate"
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 0.12
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "High API latency detected"
+          description: "95th percentile latency is {{ $value }}s over the last 5 minutes"
+          runbook_url: "https://docs.dunksense.ai/runbooks/high-latency"
+
+      - alert: VeryHighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 0.5
+        for: 2m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "Very high API latency detected"
+          description: "95th percentile latency is {{ $value }}s over the last 2 minutes"
+          runbook_url: "https://docs.dunksense.ai/runbooks/very-high-latency"
+
+  - name: dunksense_jump_processing_alerts
+    rules:
+      # Jump processing specific alerts
+      - alert: JumpProcessingBacklog
+        expr: kafka_consumer_lag_sum{topic="jump.raw"} > 1000
+        for: 10m
+        labels:
+          severity: warning
+          team: ml
+        annotations:
+          summary: "Jump processing backlog detected"
+          description: "Kafka consumer lag is {{ $value }} messages for jump.raw topic"
+          runbook_url: "https://docs.dunksense.ai/runbooks/processing-backlog"
+
+      - alert: SlowJumpProcessing
+        expr: histogram_quantile(0.95, rate(jump_processing_duration_seconds_bucket[10m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          team: ml
+        annotations:
+          summary: "Slow jump processing detected"
+          description: "95th percentile jump processing time is {{ $value }}s"
+          runbook_url: "https://docs.dunksense.ai/runbooks/slow-processing"
+
+      - alert: JumpProcessingFailures
+        expr: rate(jumps_processed_total{status="failed"}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: ml
+        annotations:
+          summary: "High jump processing failure rate"
+          description: "Jump processing failure rate is {{ $value | humanizePercentage }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/processing-failures"
+
+      - alert: ModelInferenceTimeout
+        expr: histogram_quantile(0.95, rate(model_inference_duration_seconds_bucket[5m])) > 5
+        for: 3m
+        labels:
+          severity: critical
+          team: ml
+        annotations:
+          summary: "ML model inference timeout"
+          description: "95th percentile model inference time is {{ $value }}s"
+          runbook_url: "https://docs.dunksense.ai/runbooks/model-timeout"
+
+  - name: dunksense_infrastructure_alerts
+    rules:
+      # Database alerts
+      - alert: DatabaseConnectionsHigh
+        expr: database_connections_active > 80
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "High database connection count"
+          description: "Database connections: {{ $value }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/db-connections"
+
+      - alert: DatabaseDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "Database is down"
+          description: "PostgreSQL database is not responding"
+          runbook_url: "https://docs.dunksense.ai/runbooks/db-down"
+
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "Redis is down"
+          description: "Redis cache is not responding"
+          runbook_url: "https://docs.dunksense.ai/runbooks/redis-down"
+
+      - alert: LowCacheHitRate
+        expr: rate(cache_operations_total{result="hit"}[10m]) / rate(cache_operations_total[10m]) < 0.7
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Low cache hit rate"
+          description: "Cache hit rate is {{ $value | humanizePercentage }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/low-cache-hit"
+
+      # Kafka alerts
+      - alert: KafkaDown
+        expr: up{job="kafka"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "Kafka is down"
+          description: "Kafka broker is not responding"
+          runbook_url: "https://docs.dunksense.ai/runbooks/kafka-down"
+
+      - alert: KafkaHighConsumerLag
+        expr: kafka_consumer_lag_sum > 5000
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "High Kafka consumer lag"
+          description: "Consumer lag is {{ $value }} messages"
+          runbook_url: "https://docs.dunksense.ai/runbooks/kafka-lag"
+
+  - name: dunksense_system_alerts
+    rules:
+      # System resource alerts
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 10m
+        labels:
+          severity: warning
+          team: devops
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/high-cpu"
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+          team: devops
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value }}% on {{ $labels.instance }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/high-memory"
+
+      - alert: DiskSpaceLow
+        expr: (1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          team: devops
+        annotations:
+          summary: "Low disk space"
+          description: "Disk usage is {{ $value }}% on {{ $labels.instance }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/low-disk"
+
+      - alert: ServiceDown
+        expr: up{job=~"dunksense-.*"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "Service is down"
+          description: "{{ $labels.job }} service is not responding"
+          runbook_url: "https://docs.dunksense.ai/runbooks/service-down"
+
+  - name: dunksense_business_alerts
+    rules:
+      # Business metric alerts
+      - alert: LowActiveUsers
+        expr: active_users < 100
+        for: 30m
+        labels:
+          severity: warning
+          team: product
+        annotations:
+          summary: "Low active user count"
+          description: "Active users: {{ $value }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/low-users"
+
+      - alert: NoJumpsProcessed
+        expr: rate(jumps_processed_total[30m]) == 0
+        for: 30m
+        labels:
+          severity: critical
+          team: product
+        annotations:
+          summary: "No jumps being processed"
+          description: "No jumps have been processed in the last 30 minutes"
+          runbook_url: "https://docs.dunksense.ai/runbooks/no-jumps"
+
+      - alert: HighVideoUploadFailures
+        expr: rate(video_uploads_total{status="failed"}[10m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "High video upload failure rate"
+          description: "Video upload failure rate is {{ $value | humanizePercentage }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/video-failures"
+
+      - alert: ModelAccuracyDrop
+        expr: model_accuracy < 0.85
+        for: 5m
+        labels:
+          severity: critical
+          team: ml
+        annotations:
+          summary: "ML model accuracy dropped"
+          description: "Model accuracy is {{ $value | humanizePercentage }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/model-accuracy"
+
+  - name: dunksense_security_alerts
+    rules:
+      # Security alerts
+      - alert: HighFailedLoginRate
+        expr: rate(http_requests_total{endpoint="/auth/login", status_code="401"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "High failed login rate"
+          description: "Failed login rate is {{ $value }}/sec"
+          runbook_url: "https://docs.dunksense.ai/runbooks/failed-logins"
+
+      - alert: SuspiciousTraffic
+        expr: rate(http_requests_total[1m]) > 1000
+        for: 2m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Suspicious traffic detected"
+          description: "Request rate is {{ $value }}/sec"
+          runbook_url: "https://docs.dunksense.ai/runbooks/suspicious-traffic"
+
+      - alert: TLSCertificateExpiry
+        expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 30
+        for: 1h
+        labels:
+          severity: warning
+          team: devops
+        annotations:
+          summary: "TLS certificate expiring soon"
+          description: "Certificate expires in {{ $value }} days"
+          runbook_url: "https://docs.dunksense.ai/runbooks/cert-expiry"
+
+  - name: dunksense_mobile_alerts
+    rules:
+      # Mobile app specific alerts
+      - alert: HighMobileCrashRate
+        expr: firebase_crashlytics_crash_free_sessions < 0.995
+        for: 10m
+        labels:
+          severity: critical
+          team: mobile
+        annotations:
+          summary: "High mobile app crash rate"
+          description: "Crash-free sessions: {{ $value | humanizePercentage }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/mobile-crashes"
+
+      - alert: SlowAppStartup
+        expr: firebase_performance_app_start_time_p95 > 3
+        for: 10m
+        labels:
+          severity: warning
+          team: mobile
+        annotations:
+          summary: "Slow mobile app startup"
+          description: "95th percentile app start time is {{ $value }}s"
+          runbook_url: "https://docs.dunksense.ai/runbooks/slow-startup"
+
+      - alert: HighNetworkErrors
+        expr: rate(mobile_network_errors_total[10m]) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          team: mobile
+        annotations:
+          summary: "High mobile network error rate"
+          description: "Network error rate is {{ $value | humanizePercentage }}"
+          runbook_url: "https://docs.dunksense.ai/runbooks/network-errors" 

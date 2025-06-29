@@ -1,0 +1,289 @@
+groups:
+  - name: dunksense_slo_alerts
+    rules:
+      # API Availability SLO: 99.9% over 30 days
+      # Error budget: 43.2 minutes per month
+      # Fast burn: 2% of budget in 1 hour (52 seconds)
+      # Slow burn: 10% of budget in 6 hours (4.3 minutes)
+      
+      - alert: APIAvailabilitySLOFastBurn
+        expr: |
+          (
+            1 - (
+              sum(rate(http_requests_total{status_code!~"5.."}[1h])) /
+              sum(rate(http_requests_total[1h]))
+            )
+          ) > (14.4 * (1 - 0.999))
+        for: 2m
+        labels:
+          severity: critical
+          slo: api_availability
+          burn_rate: fast
+          team: backend
+        annotations:
+          summary: "API availability SLO fast burn rate detected"
+          description: |
+            API availability is burning through error budget at {{ $value | humanizePercentage }} error rate.
+            At this rate, the monthly error budget will be exhausted in {{ with query "vector(43.2 * 60 / (14.4 * 60))" }}{{ . | first | value | humanizeDuration }}{{ end }}.
+            Current availability: {{ with query "sum(rate(http_requests_total{status_code!~\"5..\"}[1h])) / sum(rate(http_requests_total[1h]))" }}{{ . | first | value | humanizePercentage }}{{ end }}
+          runbook_url: "https://docs.dunksense.ai/runbooks/slo-fast-burn"
+          dashboard_url: "https://grafana.dunksense.ai/d/slo-dashboard"
+
+      - alert: APIAvailabilitySLOSlowBurn
+        expr: |
+          (
+            1 - (
+              sum(rate(http_requests_total{status_code!~"5.."}[6h])) /
+              sum(rate(http_requests_total[6h]))
+            )
+          ) > (6 * (1 - 0.999))
+        for: 15m
+        labels:
+          severity: warning
+          slo: api_availability
+          burn_rate: slow
+          team: backend
+        annotations:
+          summary: "API availability SLO slow burn rate detected"
+          description: |
+            API availability is slowly burning through error budget at {{ $value | humanizePercentage }} error rate.
+            At this rate, the monthly error budget will be exhausted in {{ with query "vector(43.2 * 60 / (6 * 60))" }}{{ . | first | value | humanizeDuration }}{{ end }}.
+            Current availability: {{ with query "sum(rate(http_requests_total{status_code!~\"5..\"}[6h])) / sum(rate(http_requests_total[6h]))" }}{{ . | first | value | humanizePercentage }}{{ end }}
+          runbook_url: "https://docs.dunksense.ai/runbooks/slo-slow-burn"
+
+      # API Latency SLO: 95% of requests < 120ms over 30 days
+      # Error budget: 5% of requests can exceed 120ms
+      
+      - alert: APILatencySLOFastBurn
+        expr: |
+          (
+            histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1h])) by (le)) > 0.12
+          ) and (
+            (
+              sum(rate(http_request_duration_seconds_bucket{le="0.12"}[1h])) /
+              sum(rate(http_request_duration_seconds_bucket{le="+Inf"}[1h]))
+            ) < (1 - 14.4 * 0.05)
+          )
+        for: 2m
+        labels:
+          severity: critical
+          slo: api_latency
+          burn_rate: fast
+          team: backend
+        annotations:
+          summary: "API latency SLO fast burn rate detected"
+          description: |
+            API latency is burning through error budget rapidly.
+            95th percentile latency: {{ with query "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1h])) by (le))" }}{{ . | first | value }}s{{ end }}
+            Requests meeting SLA: {{ with query "sum(rate(http_request_duration_seconds_bucket{le=\"0.12\"}[1h])) / sum(rate(http_request_duration_seconds_bucket{le=\"+Inf\"}[1h]))" }}{{ . | first | value | humanizePercentage }}{{ end }}
+          runbook_url: "https://docs.dunksense.ai/runbooks/latency-slo-burn"
+
+      - alert: APILatencySLOSlowBurn
+        expr: |
+          (
+            histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[6h])) by (le)) > 0.12
+          ) and (
+            (
+              sum(rate(http_request_duration_seconds_bucket{le="0.12"}[6h])) /
+              sum(rate(http_request_duration_seconds_bucket{le="+Inf"}[6h]))
+            ) < (1 - 6 * 0.05)
+          )
+        for: 15m
+        labels:
+          severity: warning
+          slo: api_latency
+          burn_rate: slow
+          team: backend
+        annotations:
+          summary: "API latency SLO slow burn rate detected"
+          description: |
+            API latency is slowly burning through error budget.
+            95th percentile latency: {{ with query "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[6h])) by (le))" }}{{ . | first | value }}s{{ end }}
+            Requests meeting SLA: {{ with query "sum(rate(http_request_duration_seconds_bucket{le=\"0.12\"}[6h])) / sum(rate(http_request_duration_seconds_bucket{le=\"+Inf\"}[6h]))" }}{{ . | first | value | humanizePercentage }}{{ end }}
+          runbook_url: "https://docs.dunksense.ai/runbooks/latency-slo-burn"
+
+      # Jump Processing SLO: 99.5% success rate over 30 days
+      # Error budget: 0.5% of jumps can fail
+      
+      - alert: JumpProcessingSLOFastBurn
+        expr: |
+          (
+            sum(rate(jumps_processed_total{status="failed"}[1h])) /
+            sum(rate(jumps_processed_total[1h]))
+          ) > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: critical
+          slo: jump_processing
+          burn_rate: fast
+          team: ml
+        annotations:
+          summary: "Jump processing SLO fast burn rate detected"
+          description: |
+            Jump processing is burning through error budget rapidly.
+            Current failure rate: {{ $value | humanizePercentage }}
+            Success rate: {{ with query "sum(rate(jumps_processed_total{status=\"success\"}[1h])) / sum(rate(jumps_processed_total[1h]))" }}{{ . | first | value | humanizePercentage }}{{ end }}
+          runbook_url: "https://docs.dunksense.ai/runbooks/jump-processing-slo-burn"
+
+      - alert: JumpProcessingSLOSlowBurn
+        expr: |
+          (
+            sum(rate(jumps_processed_total{status="failed"}[6h])) /
+            sum(rate(jumps_processed_total[6h]))
+          ) > (6 * 0.005)
+        for: 15m
+        labels:
+          severity: warning
+          slo: jump_processing
+          burn_rate: slow
+          team: ml
+        annotations:
+          summary: "Jump processing SLO slow burn rate detected"
+          description: |
+            Jump processing is slowly burning through error budget.
+            Current failure rate: {{ $value | humanizePercentage }}
+            Success rate: {{ with query "sum(rate(jumps_processed_total{status=\"success\"}[6h])) / sum(rate(jumps_processed_total[6h]))" }}{{ . | first | value | humanizePercentage }}{{ end }}
+          runbook_url: "https://docs.dunksense.ai/runbooks/jump-processing-slo-burn"
+
+      # Database Availability SLO: 99.99% over 30 days
+      # Error budget: 4.32 minutes per month
+      
+      - alert: DatabaseSLOFastBurn
+        expr: |
+          (1 - up{job="postgres"}) > (14.4 * (1 - 0.9999))
+        for: 1m
+        labels:
+          severity: critical
+          slo: database_availability
+          burn_rate: fast
+          team: backend
+        annotations:
+          summary: "Database availability SLO fast burn rate detected"
+          description: |
+            Database downtime is burning through error budget rapidly.
+            Database status: {{ with query "up{job=\"postgres\"}" }}{{ if eq (. | first | value) 1.0 }}UP{{ else }}DOWN{{ end }}{{ end }}
+          runbook_url: "https://docs.dunksense.ai/runbooks/database-slo-burn"
+
+  - name: dunksense_slo_budget_alerts
+    rules:
+      # Error budget exhaustion warnings
+      
+      - alert: APIAvailabilitySLOBudgetExhaustion
+        expr: |
+          (
+            1 - (
+              sum(rate(http_requests_total{status_code!~"5.."}[30d])) /
+              sum(rate(http_requests_total[30d]))
+            )
+          ) / (1 - 0.999) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          slo: api_availability
+          team: backend
+        annotations:
+          summary: "API availability SLO error budget 90% exhausted"
+          description: |
+            API availability error budget is 90% exhausted for the 30-day window.
+            Current availability: {{ with query "sum(rate(http_requests_total{status_code!~\"5..\"}[30d])) / sum(rate(http_requests_total[30d]))" }}{{ . | first | value | humanizePercentage }}{{ end }}
+            Error budget remaining: {{ with query "(1 - 0.999) - (1 - (sum(rate(http_requests_total{status_code!~\"5..\"}[30d])) / sum(rate(http_requests_total[30d]))))" }}{{ . | first | value | humanizePercentage }}{{ end }}
+          runbook_url: "https://docs.dunksense.ai/runbooks/slo-budget-exhaustion"
+
+      - alert: APILatencySLOBudgetExhaustion
+        expr: |
+          (
+            1 - (
+              sum(rate(http_request_duration_seconds_bucket{le="0.12"}[30d])) /
+              sum(rate(http_request_duration_seconds_bucket{le="+Inf"}[30d]))
+            )
+          ) / 0.05 > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          slo: api_latency
+          team: backend
+        annotations:
+          summary: "API latency SLO error budget 90% exhausted"
+          description: |
+            API latency error budget is 90% exhausted for the 30-day window.
+            Requests meeting SLA: {{ with query "sum(rate(http_request_duration_seconds_bucket{le=\"0.12\"}[30d])) / sum(rate(http_request_duration_seconds_bucket{le=\"+Inf\"}[30d]))" }}{{ . | first | value | humanizePercentage }}{{ end }}
+          runbook_url: "https://docs.dunksense.ai/runbooks/slo-budget-exhaustion"
+
+  - name: dunksense_slo_recording_rules
+    interval: 30s
+    rules:
+      # Recording rules for SLO calculations
+      
+      - record: slo:api_availability_1h
+        expr: |
+          sum(rate(http_requests_total{status_code!~"5.."}[1h])) /
+          sum(rate(http_requests_total[1h]))
+
+      - record: slo:api_availability_6h
+        expr: |
+          sum(rate(http_requests_total{status_code!~"5.."}[6h])) /
+          sum(rate(http_requests_total[6h]))
+
+      - record: slo:api_availability_1d
+        expr: |
+          sum(rate(http_requests_total{status_code!~"5.."}[1d])) /
+          sum(rate(http_requests_total[1d]))
+
+      - record: slo:api_availability_30d
+        expr: |
+          sum(rate(http_requests_total{status_code!~"5.."}[30d])) /
+          sum(rate(http_requests_total[30d]))
+
+      - record: slo:api_latency_1h
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{le="0.12"}[1h])) /
+          sum(rate(http_request_duration_seconds_bucket{le="+Inf"}[1h]))
+
+      - record: slo:api_latency_6h
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{le="0.12"}[6h])) /
+          sum(rate(http_request_duration_seconds_bucket{le="+Inf"}[6h]))
+
+      - record: slo:api_latency_1d
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{le="0.12"}[1d])) /
+          sum(rate(http_request_duration_seconds_bucket{le="+Inf"}[1d]))
+
+      - record: slo:api_latency_30d
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{le="0.12"}[30d])) /
+          sum(rate(http_request_duration_seconds_bucket{le="+Inf"}[30d]))
+
+      - record: slo:jump_processing_success_1h
+        expr: |
+          sum(rate(jumps_processed_total{status="success"}[1h])) /
+          sum(rate(jumps_processed_total[1h]))
+
+      - record: slo:jump_processing_success_6h
+        expr: |
+          sum(rate(jumps_processed_total{status="success"}[6h])) /
+          sum(rate(jumps_processed_total[6h]))
+
+      - record: slo:jump_processing_success_1d
+        expr: |
+          sum(rate(jumps_processed_total{status="success"}[1d])) /
+          sum(rate(jumps_processed_total[1d]))
+
+      - record: slo:jump_processing_success_30d
+        expr: |
+          sum(rate(jumps_processed_total{status="success"}[30d])) /
+          sum(rate(jumps_processed_total[30d]))
+
+      # Error budget calculations
+      
+      - record: slo:api_availability_error_budget_30d
+        expr: |
+          (1 - 0.999) - (1 - slo:api_availability_30d)
+
+      - record: slo:api_latency_error_budget_30d
+        expr: |
+          0.05 - (1 - slo:api_latency_30d)
+
+      - record: slo:jump_processing_error_budget_30d
+        expr: |
+          0.005 - (1 - slo:jump_processing_success_30d) 

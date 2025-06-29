@@ -1,0 +1,101 @@
+# Staging Environment Configuration
+app:
+  environment: staging
+
+# Metrics Service Configuration
+metricsService:
+  replicaCount: 2
+  resources:
+    limits:
+      cpu: 300m
+      memory: 256Mi
+    requests:
+      cpu: 150m
+      memory: 128Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 5
+
+# API Gateway Configuration
+apiGateway:
+  ingress:
+    hosts:
+      - host: staging.dunksense.ai
+        paths:
+          - path: /
+            pathType: Prefix
+
+# ML Pipeline Configuration
+mlPipeline:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+      nvidia.com/gpu: 0
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+# Database Configuration
+postgresql:
+  primary:
+    persistence:
+      size: 20Gi
+    resources:
+      limits:
+        cpu: 500m
+        memory: 1Gi
+      requests:
+        cpu: 250m
+        memory: 512Mi
+
+# Redis Configuration
+redis:
+  master:
+    persistence:
+      size: 5Gi
+    resources:
+      limits:
+        cpu: 250m
+        memory: 512Mi
+      requests:
+        cpu: 125m
+        memory: 256Mi
+
+# Kafka Configuration
+kafka:
+  replicaCount: 1
+  persistence:
+    size: 10Gi
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+# Monitoring Configuration
+monitoring:
+  prometheus:
+    server:
+      persistentVolume:
+        size: 10Gi
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 250m
+          memory: 512Mi
+
+# Environment Variables
+env:
+  # Database Configuration
+  DATABASE_MAX_CONNECTIONS: "50"
+  DATABASE_MAX_IDLE_CONNECTIONS: "5"
+  
+  # TLS Configuration
+  TLS_ENABLED: "false" 

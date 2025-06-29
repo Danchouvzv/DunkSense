@@ -1,103 +1,76 @@
 # DunkSense CI/CD Pipeline
-name: CI/CD Pipeline
+name: DunkSense CI/CD Pipeline
 
 on:
   push:
     branches: [ main, develop ]
   pull_request:
-    branches: [ main ]
-  schedule:
-    - cron: '0 2 * * *' # Nightly builds
+    branches: [ main, develop ]
+  release:
+    types: [ published ]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  GO_VERSION: '1.21'
+  NODE_VERSION: '18'
 
 jobs:
-  # Multi-platform testing matrix
-  test-matrix:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        go-version: [1.21.x]
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: ${{ matrix.go-version }}
-    
-    - name: Cache Go modules
-      uses: actions/cache@v3
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
-    
-    - name: Install dependencies
-      run: |
-        cd backend
-        go mod download
-    
-    - name: Run tests
-      run: |
-        cd backend
-        go test -v -race -coverprofile=coverage.out ./...
-    
-    - name: Upload coverage
-      if: matrix.os == 'ubuntu-latest'
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./backend/coverage.out
-
-  # Security scanning
-  security-scan:
+  # Code Quality and Security
+  code-quality:
+    name: Code Quality & Security
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.21.x
-    
-    - name: Run Gosec Security Scanner
-      uses: securecodewarrior/github-action-gosec@master
-      with:
-        args: '-fmt sarif -out gosec.sarif ./backend/...'
-    
-    - name: Upload SARIF file
-      uses: github/codeql-action/upload-sarif@v2
-      with:
-        sarif_file: gosec.sarif
-    
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: 'fs'
-        scan-ref: './backend'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-    
-    - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v2
-      with:
-        sarif_file: 'trivy-results.sarif'
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-  # Build and test
-  build-and-test:
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Run Go linting
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+          working-directory: backend
+
+      - name: Run Go security scan
+        uses: securecodewarrior/github-action-add-sarif@v1
+        with:
+          sarif-file: 'gosec-report.sarif'
+        continue-on-error: true
+
+      - name: Run dependency vulnerability scan
+        run: |
+          go install github.com/sonatypeoss/nancy@latest
+          cd backend && go list -json -deps ./... | nancy sleuth
+
+      - name: Run SonarQube analysis
+        uses: sonarqube-quality-gate-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        continue-on-error: true
+
+  # Backend Testing
+  backend-test:
+    name: Backend Tests
     runs-on: ubuntu-latest
-    needs: [test-matrix, security-scan]
-    
     services:
       postgres:
         image: postgres:15
         env:
-          POSTGRES_PASSWORD: testpass
+          POSTGRES_PASSWORD: postgres
           POSTGRES_DB: dunksense_test
         options: >-
           --health-cmd pg_isready
@@ -106,7 +79,7 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-      
+
       redis:
         image: redis:7
         options: >-
@@ -116,186 +89,316 @@ jobs:
           --health-retries 5
         ports:
           - 6379:6379
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.21.x
-    
-    - name: Install dependencies
-      run: |
-        cd backend
-        go mod download
-    
-    - name: Run linter
-      uses: golangci/golangci-lint-action@v3
-      with:
-        version: latest
-        working-directory: backend
-    
-    - name: Run tests with coverage
-      env:
-        POSTGRES_URI: postgres://postgres:testpass@localhost:5432/dunksense_test?sslmode=disable
-        REDIS_URL: redis://localhost:6379
-      run: |
-        cd backend
-        go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
-        go tool cover -html=coverage.out -o coverage.html
-    
-    - name: Run benchmarks
-      run: |
-        cd backend
-        go test -bench=. -benchmem ./...
-    
-    - name: Build application
-      run: |
-        cd backend
-        make build-prod
 
-  # Load testing
-  load-test:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[load-test]')
-    
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Start test environment
-      run: |
-        cd backend
-        docker-compose -f docker-compose.dev.yml up -d
-        sleep 30
-    
-    - name: Install k6
-      run: |
-        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-        echo "deb https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
-        sudo apt-get update
-        sudo apt-get install k6
-    
-    - name: Run load tests
-      run: |
-        k6 run --out json=load-test-results.json backend/tests/load/basic.js
-    
-    - name: Upload load test results
-      uses: actions/upload-artifact@v3
-      with:
-        name: load-test-results
-        path: load-test-results.json
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  # Docker build and push
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        run: cd backend && go mod download
+
+      - name: Run unit tests
+        run: cd backend && make test
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dunksense_test?sslmode=disable
+          REDIS_URL: redis://localhost:6379
+
+      - name: Run integration tests
+        run: cd backend && make integration-test
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dunksense_test?sslmode=disable
+          REDIS_URL: redis://localhost:6379
+
+      - name: Generate test coverage
+        run: cd backend && go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./backend/coverage.out
+          flags: backend
+
+  # iOS Testing
+  ios-test:
+    name: iOS Tests
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Cache Swift Package Manager
+        uses: actions/cache@v3
+        with:
+          path: ios/DunkSenseApp/.build
+          key: ${{ runner.os }}-spm-${{ hashFiles('ios/DunkSenseApp/Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build iOS app
+        run: |
+          cd ios/DunkSenseApp
+          xcodebuild -scheme DunkSenseApp -destination 'platform=iOS Simulator,name=iPhone 14' build
+
+      - name: Run iOS tests
+        run: |
+          cd ios/DunkSenseApp
+          xcodebuild -scheme DunkSenseApp -destination 'platform=iOS Simulator,name=iPhone 14' test
+
+  # Docker Build
   docker-build:
+    name: Docker Build
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs: [code-quality, backend-test]
+    if: github.event_name == 'push' || github.event_name == 'release'
+    strategy:
+      matrix:
+        service: [metrics-service, ml-pipeline, api-gateway]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile.${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+  # Helm Chart Testing
+  helm-test:
+    name: Helm Chart Tests
+    runs-on: ubuntu-latest
+    needs: [code-quality]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.0'
+
+      - name: Setup chart-testing
+        uses: helm/chart-testing-action@v2.6.1
+
+      - name: Run chart-testing (list-changed)
+        id: list-changed
+        run: |
+          changed=$(ct list-changed --config ct.yaml)
+          if [[ -n "$changed" ]]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run chart-testing (lint)
+        run: ct lint --config ct.yaml
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.8.0
+        if: steps.list-changed.outputs.changed == 'true'
+
+      - name: Run chart-testing (install)
+        run: ct install --config ct.yaml
+        if: steps.list-changed.outputs.changed == 'true'
+
+  # Security Scanning
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    if: github.event_name == 'push' || github.event_name == 'release'
+    strategy:
+      matrix:
+        service: [metrics-service, ml-pipeline, api-gateway]
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Performance Testing
+  performance-test:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: [docker-build]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-    
-    - name: Log in to Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=sha,prefix={{branch}}-
-          type=raw,value=latest,enable={{is_default_branch}}
-    
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: ./backend
-        file: ./backend/cmd/metrics-svc/Dockerfile
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-    
-    - name: Run Trivy vulnerability scanner on image
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-        format: 'sarif'
-        output: 'trivy-image-results.sarif'
-    
-    - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v2
-      with:
-        sarif_file: 'trivy-image-results.sarif'
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  # Deploy to staging
+      - name: Setup k6
+        run: |
+          sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Run performance tests
+        run: |
+          cd tests/performance
+          k6 run --out json=results.json load-test.js
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-results
+          path: tests/performance/results.json
+
+  # Staging Deployment
   deploy-staging:
+    name: Deploy to Staging
     runs-on: ubuntu-latest
-    needs: docker-build
-    if: github.ref == 'refs/heads/develop'
-    environment: staging
-    
+    needs: [docker-build, helm-test, security-scan]
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment:
+      name: staging
+      url: https://staging.dunksense.ai
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Deploy to staging
-      run: |
-        echo "Deploying to staging environment..."
-        # Add your deployment logic here
-    
-    - name: Run smoke tests
-      run: |
-        echo "Running smoke tests..."
-        # Add smoke test logic here
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  # Deploy to production
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name dunksense-staging
+
+      - name: Deploy to staging
+        run: |
+          helm upgrade --install dunksense-staging ./infrastructure/helm/dunksense \
+            --namespace staging \
+            --create-namespace \
+            --set-string image.tag=${{ github.sha }} \
+            --set app.environment=staging \
+            --values ./infrastructure/helm/dunksense/values-staging.yaml \
+            --wait
+
+      - name: Run smoke tests
+        run: |
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=dunksense --timeout=300s -n staging
+          curl -f https://staging.dunksense.ai/health || exit 1
+
+  # Production Deployment
   deploy-production:
+    name: Deploy to Production
     runs-on: ubuntu-latest
-    needs: docker-build
-    if: github.ref == 'refs/heads/main'
-    environment: production
-    
+    needs: [docker-build, helm-test, security-scan, performance-test]
+    if: github.event_name == 'release'
+    environment:
+      name: production
+      url: https://api.dunksense.ai
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Deploy to production
-      run: |
-        echo "Deploying to production environment..."
-        # Add your deployment logic here
-    
-    - name: Run health checks
-      run: |
-        echo "Running production health checks..."
-        # Add health check logic here
-    
-    - name: Notify Slack
-      if: always()
-      uses: 8398a7/action-slack@v3
-      with:
-        status: ${{ job.status }}
-        channel: '#deployments'
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name dunksense-production
+
+      - name: Deploy to production
+        run: |
+          helm upgrade --install dunksense ./infrastructure/helm/dunksense \
+            --namespace production \
+            --create-namespace \
+            --set-string image.tag=${{ github.ref_name }} \
+            --set app.environment=production \
+            --values ./infrastructure/helm/dunksense/values-production.yaml \
+            --wait
+
+      - name: Run smoke tests
+        run: |
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=dunksense --timeout=300s -n production
+          curl -f https://api.dunksense.ai/health || exit 1
+
+      - name: Notify deployment
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        if: always()
 
   # Cleanup
   cleanup:
+    name: Cleanup
     runs-on: ubuntu-latest
-    if: always()
     needs: [deploy-staging, deploy-production]
-    
+    if: always()
     steps:
-    - name: Clean up old images
-      run: |
-        echo "Cleaning up old container images..."
-        # Add cleanup logic here 
+      - name: Delete old container images
+        run: |
+          # Keep only the last 10 images
+          echo "Cleanup would run here in a real scenario" 

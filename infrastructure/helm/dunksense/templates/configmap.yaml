@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dunksense.fullname" . }}-config
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+data:
+  # Server Configuration
+  SERVER_HOST: {{ .Values.env.SERVER_HOST | quote }}
+  SERVER_READ_TIMEOUT: {{ .Values.env.SERVER_READ_TIMEOUT | quote }}
+  SERVER_WRITE_TIMEOUT: {{ .Values.env.SERVER_WRITE_TIMEOUT | quote }}
+  
+  # Database Configuration
+  DATABASE_HOST: {{ .Values.env.DATABASE_HOST | quote }}
+  DATABASE_PORT: {{ .Values.env.DATABASE_PORT | quote }}
+  DATABASE_NAME: {{ .Values.env.DATABASE_NAME | quote }}
+  DATABASE_USER: {{ .Values.env.DATABASE_USER | quote }}
+  DATABASE_SSL_MODE: {{ .Values.env.DATABASE_SSL_MODE | quote }}
+  DATABASE_MAX_CONNECTIONS: {{ .Values.env.DATABASE_MAX_CONNECTIONS | quote }}
+  DATABASE_MAX_IDLE_CONNECTIONS: {{ .Values.env.DATABASE_MAX_IDLE_CONNECTIONS | quote }}
+  
+  # Redis Configuration
+  REDIS_HOST: {{ .Values.env.REDIS_HOST | quote }}
+  REDIS_PORT: {{ .Values.env.REDIS_PORT | quote }}
+  REDIS_DB: {{ .Values.env.REDIS_DB | quote }}
+  
+  # Kafka Configuration
+  KAFKA_BROKERS: {{ .Values.env.KAFKA_BROKERS | quote }}
+  KAFKA_TOPIC_JUMP_EVENTS: {{ .Values.env.KAFKA_TOPIC_JUMP_EVENTS | quote }}
+  KAFKA_TOPIC_USER_EVENTS: {{ .Values.env.KAFKA_TOPIC_USER_EVENTS | quote }}
+  KAFKA_TOPIC_ANALYTICS: {{ .Values.env.KAFKA_TOPIC_ANALYTICS | quote }}
+  
+  # Authentication
+  JWT_EXPIRY: {{ .Values.env.JWT_EXPIRY | quote }}
+  
+  # External Services
+  FIREBASE_PROJECT_ID: {{ .Values.env.FIREBASE_PROJECT_ID | quote }}
+  
+  # Monitoring
+  PROMETHEUS_ENDPOINT: {{ .Values.env.PROMETHEUS_ENDPOINT | quote }}
+  JAEGER_ENDPOINT: {{ .Values.env.JAEGER_ENDPOINT | quote }}
+  
+  # TLS Configuration
+  TLS_ENABLED: {{ .Values.env.TLS_ENABLED | quote }}
+  TLS_CERT_PATH: {{ .Values.env.TLS_CERT_PATH | quote }}
+  TLS_KEY_PATH: {{ .Values.env.TLS_KEY_PATH | quote }}
+  
+  # Application Configuration
+  APP_NAME: {{ .Values.app.name | quote }}
+  APP_VERSION: {{ .Values.app.version | quote }}
+  APP_ENVIRONMENT: {{ .Values.app.environment | quote }} 

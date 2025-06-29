@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dunksense.fullname" . }}-metrics
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-service
+spec:
+  type: {{ .Values.metricsService.service.type }}
+  ports:
+    - port: {{ .Values.metricsService.service.port }}
+      targetPort: {{ .Values.metricsService.service.targetPort }}
+      protocol: TCP
+      name: http
+    - port: 9090
+      targetPort: 9090
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "dunksense.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-service
+
+---
+{{- if .Values.apiGateway.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dunksense.fullname" . }}-api-gateway
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+spec:
+  type: {{ .Values.apiGateway.service.type }}
+  ports:
+    - port: {{ .Values.apiGateway.service.port }}
+      targetPort: {{ .Values.apiGateway.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "dunksense.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+{{- end }}
+
+---
+{{- if .Values.mlPipeline.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dunksense.fullname" . }}-ml-pipeline
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ml-pipeline
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+    - port: 9090
+      targetPort: 9090
+      protocol: TCP
+      name: grpc
+  selector:
+    {{- include "dunksense.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ml-pipeline
+{{- end }} 

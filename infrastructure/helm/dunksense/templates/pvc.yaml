@@ -1,0 +1,36 @@
+{{- if .Values.mlPipeline.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "dunksense.fullname" . }}-models
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ml-pipeline
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.mlPipeline.storage.models.size }}
+  {{- if .Values.mlPipeline.storage.models.storageClass }}
+  storageClassName: {{ .Values.mlPipeline.storage.models.storageClass }}
+  {{- end }}
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "dunksense.fullname" . }}-cache
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ml-pipeline
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.mlPipeline.storage.cache.size }}
+  {{- if .Values.mlPipeline.storage.cache.storageClass }}
+  storageClassName: {{ .Values.mlPipeline.storage.cache.storageClass }}
+  {{- end }}
+{{- end }} 

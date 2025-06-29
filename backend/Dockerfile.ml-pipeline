@@ -1,0 +1,74 @@
+# Build stage
+ARG GO_VERSION=1.21
+FROM golang:${GO_VERSION}-alpine AS builder
+
+# Security labels
+LABEL maintainer="DunkSense AI Team <team@dunksense.ai>"
+LABEL version="1.0.0"
+LABEL description="DunkSense AI ML Pipeline - Machine learning processing service"
+
+# Install security updates and certificates
+RUN apk update && apk add --no-cache \
+    ca-certificates \
+    git \
+    tzdata \
+    && rm -rf /var/cache/apk/*
+
+# Create non-root user for build
+RUN adduser -D -s /bin/sh -u 1001 appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files first for better caching
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+
+# Copy source code
+COPY . .
+
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags='-w -s -extldflags "-static"' \
+    -a -installsuffix cgo \
+    -o ml-pipeline ./cmd/ml-pipeline/
+
+# Runtime stage
+FROM alpine:3.18
+
+# Security labels
+LABEL maintainer="DunkSense AI Team <team@dunksense.ai>"
+LABEL version="1.0.0"
+LABEL description="DunkSense AI ML Pipeline - Machine learning processing service"
+
+# Install security updates and certificates
+RUN apk update && apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    && rm -rf /var/cache/apk/* \
+    && update-ca-certificates
+
+# Create non-root user
+RUN adduser -D -s /bin/sh -u 1001 appuser
+
+# Create app directory with correct permissions
+RUN mkdir -p /app /tmp/models && chown -R appuser:appuser /app /tmp/models
+
+# Copy binary from builder stage
+COPY --from=builder --chown=appuser:appuser /app/ml-pipeline /app/
+
+# Switch to non-root user
+USER appuser
+
+# Set working directory
+WORKDIR /app
+
+# Expose port (non-privileged)
+EXPOSE 8081
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD ["/app/ml-pipeline", "-health-check"]
+
+# Use exec form for better signal handling
+ENTRYPOINT ["/app/ml-pipeline"] 

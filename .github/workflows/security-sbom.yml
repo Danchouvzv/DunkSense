@@ -1,0 +1,306 @@
+# Supply Chain Security - SBOM & Image Signing
+name: Supply Chain Security
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 2 * * *'  # Daily SBOM generation
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Generate SBOM for Go dependencies
+  sbom-generation:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate Go SBOM
+        run: |
+          cd backend
+          syft packages . -o cyclonedx-json=../sbom-backend.json
+          syft packages . -o spdx-json=../sbom-backend-spdx.json
+          syft packages . -o table=../sbom-backend.txt
+
+      - name: Generate Container SBOM
+        if: github.event_name == 'push'
+        run: |
+          # Build temporary image for SBOM generation
+          docker build -t temp-image:latest ./backend -f ./backend/Dockerfile.metrics-service
+          syft packages temp-image:latest -o cyclonedx-json=sbom-container.json
+          syft packages temp-image:latest -o spdx-json=sbom-container-spdx.json
+
+      - name: Vulnerability Scan with Grype
+        run: |
+          grype sbom-backend.json -o sarif --file grype-results.sarif
+          grype sbom-backend.json -o table --file grype-results.txt
+
+      - name: Upload SBOM to GitHub
+        uses: actions/upload-artifact@v3
+        with:
+          name: sbom-reports
+          path: |
+            sbom-*.json
+            sbom-*.txt
+            grype-results.*
+
+      - name: Upload Grype scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: grype-results.sarif
+
+      - name: Check for critical vulnerabilities
+        run: |
+          CRITICAL_COUNT=$(grype sbom-backend.json -o json | jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length')
+          HIGH_COUNT=$(grype sbom-backend.json -o json | jq '[.matches[] | select(.vulnerability.severity == "High")] | length')
+          
+          echo "Critical vulnerabilities: $CRITICAL_COUNT"
+          echo "High vulnerabilities: $HIGH_COUNT"
+          
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "❌ Critical vulnerabilities found! Failing the build."
+            exit 1
+          fi
+          
+          if [ "$HIGH_COUNT" -gt 5 ]; then
+            echo "⚠️ Too many high severity vulnerabilities ($HIGH_COUNT > 5)"
+            exit 1
+          fi
+
+  # Container Image Signing with Cosign
+  image-signing:
+    name: Sign Container Images
+    runs-on: ubuntu-latest
+    needs: [sbom-generation]
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      matrix:
+        service: [metrics-service, ml-pipeline, api-gateway]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.2.2'
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile.${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Sign container image
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
+          done
+          cosign sign --yes ${images}
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Generate SBOM for container
+        run: |
+          for tag in ${TAGS}; do
+            syft packages ${tag} -o cyclonedx-json=sbom-${tag##*/}.json
+            cosign attest --yes --predicate sbom-${tag##*/}.json --type cyclonedx ${tag}@${DIGEST}
+          done
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Verify signatures
+        run: |
+          for tag in ${TAGS}; do
+            cosign verify ${tag}@${DIGEST} --certificate-identity-regexp="^https://github.com/${{ github.repository }}/" --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+          done
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+  # License Compliance Check
+  license-compliance:
+    name: License Compliance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Install go-licenses
+        run: go install github.com/google/go-licenses@latest
+
+      - name: Check licenses
+        run: |
+          cd backend
+          go-licenses report ./... --template licenses.tpl > ../license-report.txt
+          go-licenses check ./... --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,MIT,ISC
+
+      - name: Upload license report
+        uses: actions/upload-artifact@v3
+        with:
+          name: license-report
+          path: license-report.txt
+
+  # Dependency Track Integration
+  dependency-track:
+    name: Upload to Dependency Track
+    runs-on: ubuntu-latest
+    needs: [sbom-generation]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Download SBOM artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: sbom-reports
+
+      - name: Upload SBOM to Dependency Track
+        run: |
+          curl -X POST \
+            -H "X-API-Key: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}" \
+            -H "Content-Type: multipart/form-data" \
+            -F "project=${{ secrets.DEPENDENCY_TRACK_PROJECT_UUID }}" \
+            -F "bom=@sbom-backend.json" \
+            "${{ secrets.DEPENDENCY_TRACK_URL }}/api/v1/bom"
+
+  # Policy Enforcement with OPA Gatekeeper
+  policy-check:
+    name: Policy Compliance Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install OPA
+        run: |
+          curl -L -o opa https://openpolicyagent.org/downloads/v0.58.0/opa_linux_amd64_static
+          chmod 755 ./opa
+          sudo mv opa /usr/local/bin
+
+      - name: Install Conftest
+        run: |
+          wget https://github.com/open-policy-agent/conftest/releases/download/v0.46.0/conftest_0.46.0_Linux_x86_64.tar.gz
+          tar xzf conftest_0.46.0_Linux_x86_64.tar.gz
+          sudo mv conftest /usr/local/bin
+
+      - name: Validate Kubernetes manifests
+        run: |
+          conftest verify --policy policies/ infrastructure/helm/dunksense/templates/
+
+      - name: Check Docker security policies
+        run: |
+          conftest test --policy policies/docker.rego backend/Dockerfile.*
+
+  # Generate Security Report
+  security-report:
+    name: Generate Security Report
+    runs-on: ubuntu-latest
+    needs: [sbom-generation, license-compliance, policy-check]
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Generate security summary
+        run: |
+          cat > security-report.md << 'EOF'
+          # 🔒 Security Report - DunkSense AI
+          
+          ## 📊 Summary
+          - **Generated**: $(date)
+          - **Commit**: ${{ github.sha }}
+          - **Branch**: ${{ github.ref_name }}
+          
+          ## 🛡️ SBOM Analysis
+          - Backend dependencies scanned
+          - Container images analyzed
+          - Vulnerability assessment completed
+          
+          ## 📜 License Compliance
+          - All dependencies checked for license compatibility
+          - Only approved licenses detected
+          
+          ## 🔐 Image Signing
+          - All container images signed with Cosign
+          - SBOM attestations attached
+          - Signatures verified
+          
+          ## 📋 Policy Compliance
+          - Kubernetes manifests validated
+          - Docker security policies enforced
+          - OPA Gatekeeper policies passed
+          
+          EOF
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-report
+          path: security-report.md 

@@ -1,0 +1,278 @@
+global:
+  # Global SMTP configuration
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: 'alerts@dunksense.ai'
+  smtp_auth_username: 'alerts@dunksense.ai'
+  smtp_auth_password: '${SMTP_PASSWORD}'
+  smtp_require_tls: true
+
+  # Slack API URL
+  slack_api_url: '${SLACK_API_URL}'
+
+# Templates for alert notifications
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Main routing configuration
+route:
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: 'default-receiver'
+  
+  routes:
+    # Critical alerts - immediate escalation
+    - match:
+        severity: critical
+      receiver: 'critical-alerts'
+      group_wait: 10s
+      group_interval: 2m
+      repeat_interval: 5m
+      routes:
+        # SLO burn alerts need immediate attention
+        - match_re:
+            alertname: '.*SLOFastBurn'
+          receiver: 'slo-critical'
+          group_wait: 5s
+          repeat_interval: 2m
+        
+        # Database issues
+        - match:
+            team: backend
+        - match_re:
+            alertname: '.*Database.*'
+          receiver: 'backend-critical'
+        
+        # ML pipeline issues
+        - match:
+            team: ml
+          receiver: 'ml-critical'
+
+    # Warning alerts - standard escalation
+    - match:
+        severity: warning
+      receiver: 'warning-alerts'
+      group_wait: 2m
+      group_interval: 10m
+      repeat_interval: 4h
+      routes:
+        - match:
+            team: backend
+          receiver: 'backend-warnings'
+        
+        - match:
+            team: ml
+          receiver: 'ml-warnings'
+        
+        - match:
+            team: frontend
+          receiver: 'frontend-warnings'
+
+    # Info alerts - low priority
+    - match:
+        severity: info
+      receiver: 'info-alerts'
+      group_wait: 5m
+      group_interval: 30m
+      repeat_interval: 24h
+
+    # Maintenance window - suppress alerts
+    - match:
+        maintenance: 'true'
+      receiver: 'null'
+
+# Alert receivers/notification channels
+receivers:
+  - name: 'default-receiver'
+    slack_configs:
+      - api_url: '${SLACK_API_URL}'
+        channel: '#alerts-general'
+        title: '🚨 DunkSense Alert'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Severity:* {{ .Labels.severity }}
+          *Team:* {{ .Labels.team }}
+          {{ end }}
+
+  - name: 'critical-alerts'
+    pagerduty_configs:
+      - routing_key: '${PAGERDUTY_ROUTING_KEY}'
+        description: 'Critical alert in DunkSense: {{ .GroupLabels.alertname }}'
+        details:
+          firing: '{{ .Alerts.Firing | len }}'
+          resolved: '{{ .Alerts.Resolved | len }}'
+          alerts: |
+            {{ range .Alerts }}
+            - {{ .Annotations.summary }}
+            {{ end }}
+    
+    slack_configs:
+      - api_url: '${SLACK_API_URL}'
+        channel: '#alerts-critical'
+        username: 'AlertManager'
+        icon_emoji: ':fire:'
+        title: '🔥 CRITICAL: {{ .GroupLabels.alertname }}'
+        text: |
+          <!channel>
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Runbook:* {{ .Annotations.runbook_url }}
+          *Dashboard:* {{ .Annotations.dashboard_url }}
+          {{ end }}
+
+  - name: 'slo-critical'
+    pagerduty_configs:
+      - routing_key: '${PAGERDUTY_SLO_ROUTING_KEY}'
+        description: 'SLO Breach: {{ .GroupLabels.alertname }}'
+        severity: 'critical'
+    
+    slack_configs:
+      - api_url: '${SLACK_API_URL}'
+        channel: '#slo-alerts'
+        username: 'SLO Monitor'
+        icon_emoji: ':warning:'
+        title: '⚠️ SLO BREACH: {{ .GroupLabels.slo }}'
+        text: |
+          <!here>
+          *SLO:* {{ .GroupLabels.slo }}
+          *Burn Rate:* {{ .GroupLabels.burn_rate }}
+          *Current Error Budget:* Burning fast!
+          
+          {{ range .Alerts }}
+          {{ .Annotations.description }}
+          {{ end }}
+
+  - name: 'backend-critical'
+    slack_configs:
+      - api_url: '${SLACK_API_URL}'
+        channel: '#backend-alerts'
+        username: 'Backend Monitor'
+        icon_emoji: ':rotating_light:'
+        title: '🚨 Backend Critical: {{ .GroupLabels.alertname }}'
+        text: |
+          @backend-oncall
+          {{ range .Alerts }}
+          *Service:* {{ .Labels.service }}
+          *Issue:* {{ .Annotations.summary }}
+          *Details:* {{ .Annotations.description }}
+          {{ end }}
+
+  - name: 'ml-critical'
+    slack_configs:
+      - api_url: '${SLACK_API_URL}'
+        channel: '#ml-alerts'
+        username: 'ML Monitor'
+        icon_emoji: ':robot_face:'
+        title: '🤖 ML Critical: {{ .GroupLabels.alertname }}'
+        text: |
+          @ml-oncall
+          {{ range .Alerts }}
+          *Pipeline:* {{ .Labels.pipeline }}
+          *Issue:* {{ .Annotations.summary }}
+          *Model:* {{ .Labels.model }}
+          {{ end }}
+
+  - name: 'warning-alerts'
+    slack_configs:
+      - api_url: '${SLACK_API_URL}'
+        channel: '#alerts-warnings'
+        username: 'AlertManager'
+        icon_emoji: ':warning:'
+        title: '⚠️ Warning: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Team:* {{ .Labels.team }}
+          {{ end }}
+
+  - name: 'backend-warnings'
+    slack_configs:
+      - api_url: '${SLACK_API_URL}'
+        channel: '#backend-alerts'
+        username: 'Backend Monitor'
+        icon_emoji: ':warning:'
+        title: '⚠️ Backend Warning: {{ .GroupLabels.alertname }}'
+
+  - name: 'ml-warnings'
+    slack_configs:
+      - api_url: '${SLACK_API_URL}'
+        channel: '#ml-alerts'
+        username: 'ML Monitor'
+        icon_emoji: ':warning:'
+        title: '⚠️ ML Warning: {{ .GroupLabels.alertname }}'
+
+  - name: 'frontend-warnings'
+    slack_configs:
+      - api_url: '${SLACK_API_URL}'
+        channel: '#frontend-alerts'
+        username: 'Frontend Monitor'
+        icon_emoji: ':warning:'
+        title: '⚠️ Frontend Warning: {{ .GroupLabels.alertname }}'
+
+  - name: 'info-alerts'
+    slack_configs:
+      - api_url: '${SLACK_API_URL}'
+        channel: '#alerts-info'
+        username: 'AlertManager'
+        icon_emoji: ':information_source:'
+        title: 'ℹ️ Info: {{ .GroupLabels.alertname }}'
+
+  # Null receiver for suppressed alerts
+  - name: 'null'
+
+# Inhibition rules - suppress lower severity alerts when higher severity is firing
+inhibit_rules:
+  # Suppress warning alerts when critical alerts are firing for the same service
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'service']
+
+  # Suppress info alerts when warning or critical alerts are firing
+  - source_match:
+      severity: 'warning'
+    target_match:
+      severity: 'info'
+    equal: ['alertname', 'service']
+
+  # Suppress individual service alerts when cluster-wide alerts are firing
+  - source_match_re:
+      alertname: '.*ClusterDown'
+    target_match_re:
+      alertname: '.*ServiceDown'
+    equal: ['cluster']
+
+  # Suppress latency alerts when availability alerts are firing
+  - source_match:
+      slo: 'api_availability'
+    target_match:
+      slo: 'api_latency'
+    equal: ['service']
+
+# Mute/silence configuration
+mute_time_intervals:
+  # Maintenance window - Sundays 2-4 AM UTC
+  - name: maintenance-window
+    time_intervals:
+      - weekdays: ['sunday']
+        times:
+          - start_time: '02:00'
+            end_time: '04:00'
+
+  # Business hours - Monday to Friday 9 AM - 6 PM UTC
+  - name: business-hours
+    time_intervals:
+      - weekdays: ['monday:friday']
+        times:
+          - start_time: '09:00'
+            end_time: '18:00'
+
+  # Weekend - Saturday and Sunday
+  - name: weekend
+    time_intervals:
+      - weekdays: ['saturday', 'sunday'] 

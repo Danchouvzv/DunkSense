@@ -1,0 +1,277 @@
+{{- if .Values.rollouts.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ include "dunksense.fullname" . }}-metrics
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-service
+spec:
+  {{- if not .Values.metricsService.autoscaling.enabled }}
+  replicas: {{ .Values.metricsService.replicaCount }}
+  {{- end }}
+  strategy:
+    {{- if eq .Values.rollouts.strategy "blueGreen" }}
+    blueGreen:
+      activeService: {{ include "dunksense.fullname" . }}-metrics
+      previewService: {{ include "dunksense.fullname" . }}-metrics-preview
+      autoPromotionEnabled: {{ .Values.rollouts.autoPromotionEnabled }}
+      scaleDownDelaySeconds: {{ .Values.rollouts.scaleDownDelaySeconds }}
+      prePromotionAnalysis:
+        templates:
+        - templateName: success-rate
+        args:
+        - name: service-name
+          value: {{ include "dunksense.fullname" . }}-metrics-preview
+      postPromotionAnalysis:
+        templates:
+        - templateName: success-rate
+        args:
+        - name: service-name
+          value: {{ include "dunksense.fullname" . }}-metrics
+    {{- else if eq .Values.rollouts.strategy "canary" }}
+    canary:
+      canaryService: {{ include "dunksense.fullname" . }}-metrics-canary
+      stableService: {{ include "dunksense.fullname" . }}-metrics
+      trafficRouting:
+        nginx:
+          stableIngress: {{ include "dunksense.fullname" . }}-api-gateway
+      steps:
+      - setWeight: 10
+      - pause: {duration: 2m}
+      - analysis:
+          templates:
+          - templateName: success-rate
+          args:
+          - name: service-name
+            value: {{ include "dunksense.fullname" . }}-metrics-canary
+      - setWeight: 25
+      - pause: {duration: 5m}
+      - analysis:
+          templates:
+          - templateName: success-rate
+          - templateName: latency
+          args:
+          - name: service-name
+            value: {{ include "dunksense.fullname" . }}-metrics-canary
+      - setWeight: 50
+      - pause: {duration: 10m}
+      - setWeight: 75
+      - pause: {duration: 5m}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "dunksense.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: metrics-service
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "dunksense.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: metrics-service
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "dunksense.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+      containers:
+        - name: metrics-service
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          image: "{{ .Values.metricsService.image.repository }}:{{ .Values.metricsService.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.metricsService.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.metricsService.service.targetPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: SERVER_PORT
+              value: "{{ .Values.metricsService.service.targetPort }}"
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dunksense.fullname" . }}-secret
+                  key: database-password
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dunksense.fullname" . }}-secret
+                  key: redis-password
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dunksense.fullname" . }}-secret
+                  key: jwt-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dunksense.fullname" . }}-secret
+                  key: openai-api-key
+          envFrom:
+            - configMapRef:
+                name: {{ include "dunksense.fullname" . }}-config
+          {{- if .Values.metricsService.healthCheck.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.metricsService.healthCheck.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.metricsService.healthCheck.initialDelaySeconds }}
+            periodSeconds: {{ .Values.metricsService.healthCheck.periodSeconds }}
+            timeoutSeconds: {{ .Values.metricsService.healthCheck.timeoutSeconds }}
+            failureThreshold: {{ .Values.metricsService.healthCheck.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.metricsService.healthCheck.path }}
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: {{ .Values.metricsService.healthCheck.timeoutSeconds }}
+            failureThreshold: 3
+          {{- end }}
+          resources:
+            {{- toYaml .Values.metricsService.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /app/cache
+            {{- if .Values.env.TLS_ENABLED }}
+            - name: tls-certs
+              mountPath: /etc/tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+        {{- if .Values.env.TLS_ENABLED }}
+        - name: tls-certs
+          secret:
+            secretName: {{ include "dunksense.fullname" . }}-tls
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+---
+# Analysis Templates
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+spec:
+  args:
+  - name: service-name
+  metrics:
+  - name: success-rate
+    interval: 30s
+    successCondition: result[0] >= 0.95
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: http://prometheus-server:80
+        query: |
+          sum(rate(http_requests_total{service="{{`{{args.service-name}}`}}",status_code!~"5.."}[2m])) /
+          sum(rate(http_requests_total{service="{{`{{args.service-name}}`}}"}[2m]))
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: latency
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+spec:
+  args:
+  - name: service-name
+  metrics:
+  - name: latency-p95
+    interval: 30s
+    successCondition: result[0] <= 0.12
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: http://prometheus-server:80
+        query: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{service="{{`{{args.service-name}}`}}"}[2m])) by (le)
+          )
+
+---
+# Preview Service for Blue-Green
+{{- if eq .Values.rollouts.strategy "blueGreen" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dunksense.fullname" . }}-metrics-preview
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-service-preview
+spec:
+  type: {{ .Values.metricsService.service.type }}
+  ports:
+    - port: {{ .Values.metricsService.service.port }}
+      targetPort: {{ .Values.metricsService.service.targetPort }}
+      protocol: TCP
+      name: http
+    - port: 9090
+      targetPort: 9090
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "dunksense.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-service
+{{- end }}
+
+---
+# Canary Service
+{{- if eq .Values.rollouts.strategy "canary" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dunksense.fullname" . }}-metrics-canary
+  labels:
+    {{- include "dunksense.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-service-canary
+spec:
+  type: {{ .Values.metricsService.service.type }}
+  ports:
+    - port: {{ .Values.metricsService.service.port }}
+      targetPort: {{ .Values.metricsService.service.targetPort }}
+      protocol: TCP
+      name: http
+    - port: 9090
+      targetPort: 9090
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "dunksense.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-service
+{{- end }}
+{{- end }} 

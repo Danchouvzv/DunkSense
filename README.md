@@ -289,18 +289,6 @@ We welcome contributions from the community! Please see our [Contributing Guidel
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🆘 Support
-
-### Getting Help
-- **Documentation**: Check the `/docs` directory
-- **Issues**: Create a GitHub issue for bugs or feature requests
-- **Discussions**: Use GitHub Discussions for questions
-- **Email**: Contact the development team
-
-### Community
-- **Discord**: Join our developer community
-- **Twitter**: Follow @DunkSenseAI for updates
-- **Blog**: Read about latest features and insights
 
 ## 🙏 Acknowledgments
 
